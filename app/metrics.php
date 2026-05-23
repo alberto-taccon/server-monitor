@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/database.php';
 require_once __DIR__ . '/helpers.php';
+require_once __DIR__ . '/server_info.php';
 
 function latest_metric(): ?array
 {
     try {
-        $stmt = db()->query('SELECT * FROM server_metrics ORDER BY recorded_at DESC, id DESC LIMIT 1');
+        $stmt = db()->query('SELECT * FROM server_metrics ORDER BY id DESC LIMIT 1');
         $metric = $stmt->fetch();
 
         return $metric ?: null;
@@ -25,6 +26,27 @@ function metric_definitions(): array
         'ram_usage' => ['title' => 'RAM Usage', 'subtitle' => 'System memory'],
         'disk_usage' => ['title' => 'Disk Usage', 'subtitle' => 'Root filesystem'],
     ];
+}
+
+function metric_history(int $limit = 30): array
+{
+    $limit = min(200, max(1, $limit));
+
+    try {
+        $stmt = db()->prepare('
+            SELECT id, recorded_at, cpu_usage, ram_usage, disk_usage
+            FROM server_metrics
+            ORDER BY id DESC
+            LIMIT :limit
+        ');
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return array_reverse($stmt->fetchAll());
+    } catch (Throwable $exception) {
+        app_log($exception);
+        return [];
+    }
 }
 
 function network_totals(): ?array
@@ -101,53 +123,124 @@ function network_usage_snapshot(int $sampleMicroseconds = 200000): ?array
     ];
 }
 
-function metric_history(int $limit = 30): array
+function read_cpu_stats(): ?array
 {
-    $limit = min(200, max(1, $limit));
-
-    try {
-        $stmt = db()->prepare('
-            SELECT id, recorded_at, cpu_usage, ram_usage, disk_usage
-            FROM server_metrics
-            ORDER BY recorded_at DESC, id DESC
-            LIMIT :limit
-        ');
-        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
-        $stmt->execute();
-
-        return array_reverse($stmt->fetchAll());
-    } catch (Throwable $exception) {
-        app_log($exception);
-        return [];
+    if (!is_readable('/proc/stat')) {
+        return null;
     }
-}
 
-function metric_cards(?array $latest): array
-{
-    $cards = [];
+    $lines = file('/proc/stat', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($lines === false) {
+        return null;
+    }
 
-    foreach (metric_definitions() as $metricKey => $definition) {
-        $cards[] = [
-            $definition['title'],
-            isset($latest[$metricKey]) ? (float) $latest[$metricKey] : null,
-            $definition['subtitle'],
+    $stats = [];
+
+    foreach ($lines as $line) {
+        if (!preg_match('/^(cpu\d*)\s+(.+)$/', trim($line), $matches)) {
+            continue;
+        }
+
+        $label = $matches[1];
+        $parts = preg_split('/\s+/', trim($matches[2]));
+
+        if (!is_array($parts) || count($parts) < 4) {
+            continue;
+        }
+
+        $values = array_map('intval', $parts);
+        $idle = ($values[3] ?? 0) + ($values[4] ?? 0);
+
+        $stats[$label] = [
+            'idle' => $idle,
+            'total' => array_sum($values),
         ];
     }
 
-    return $cards;
+    return $stats === [] ? null : $stats;
 }
 
-function metric_card_payload(?array $latest): array
+function build_cpu_snapshot_from_stats(array $first, array $second): ?array
+{
+    $overallUsage = null;
+    $cores = [];
+    $coreUsageSum = 0.0;
+    $coreCount = 0;
+
+    foreach ($second as $label => $current) {
+        if (!isset($first[$label])) {
+            continue;
+        }
+
+        $idleDelta = $current['idle'] - $first[$label]['idle'];
+        $totalDelta = $current['total'] - $first[$label]['total'];
+        $usage = $totalDelta <= 0
+            ? 0.0
+            : round((1 - ($idleDelta / $totalDelta)) * 100, 2);
+
+        if ($label === 'cpu') {
+            $overallUsage = round($usage, 2);
+            continue;
+        }
+
+        $roundedUsage = round($usage, 2);
+        $cores[] = [
+            'label' => strtoupper($label),
+            'usage' => $roundedUsage,
+        ];
+        $coreUsageSum += $roundedUsage;
+        $coreCount++;
+    }
+
+    if ($coreCount > 0) {
+        $overallUsage = round($coreUsageSum / $coreCount, 2);
+    }
+
+    $load = sys_getloadavg();
+
+    return [
+        'usage' => $overallUsage,
+        'core_count' => $coreCount,
+        'cores' => $cores,
+        'load_averages' => [
+            isset($load[0]) ? round((float) $load[0], 2) : null,
+            isset($load[1]) ? round((float) $load[1], 2) : null,
+            isset($load[2]) ? round((float) $load[2], 2) : null,
+        ],
+    ];
+}
+
+function sampled_cpu_snapshot(int $sampleMicroseconds = 500000): ?array
+{
+    $first = read_cpu_stats();
+    if ($first === null) {
+        return null;
+    }
+
+    usleep($sampleMicroseconds);
+
+    $second = read_cpu_stats();
+    if ($second === null) {
+        return null;
+    }
+
+    return build_cpu_snapshot_from_stats($first, $second);
+}
+
+function metric_card_payload(?array $latest, ?array $network = null): array
 {
     $cards = [];
 
     foreach (metric_definitions() as $metricKey => $definition) {
         $value = isset($latest[$metricKey]) ? (float) $latest[$metricKey] : null;
+
         $cards[$metricKey] = [
             'title' => $definition['title'],
             'subtitle' => $definition['subtitle'],
             'value' => $value,
-            'formatted_value' => format_percentage($value),
+            'formatted_value' => $metricKey === 'cpu_usage'
+                ? format_percentage($value, 2)
+                : format_percentage($value, 1),
             'variant' => $value === null ? 'secondary' : percentage_class($value),
             'clamped_value' => clamp_percentage($value ?? 0.0),
             'show_progress' => true,
@@ -155,7 +248,7 @@ function metric_card_payload(?array $latest): array
         ];
     }
 
-    $network = network_usage_snapshot();
+    $network ??= network_usage_snapshot();
     $cards['network_usage'] = [
         'title' => 'Network Usage',
         'subtitle' => $network === null
@@ -178,6 +271,7 @@ function dashboard_metrics_payload(int $limit = 30): array
 {
     $history = metric_history($limit);
     $latest = latest_metric();
+    $network = network_usage_snapshot();
 
     return [
         'latest_recorded_at' => $latest['recorded_at'] ?? null,
@@ -187,6 +281,17 @@ function dashboard_metrics_payload(int $limit = 30): array
             'cpu' => array_map(static fn (array $row): float => (float) $row['cpu_usage'], $history),
             'ram' => array_map(static fn (array $row): float => (float) $row['ram_usage'], $history),
         ],
-        'cards' => metric_card_payload($latest),
+        'cards' => metric_card_payload($latest, $network),
+        'database_status' => database_is_available(),
+        'services' => monitored_services(),
+        'system' => [
+            'uptime' => uptime_information(),
+            'operating_system' => os_information(),
+            'php_version' => PHP_VERSION,
+            'load_average' => load_average_information(),
+            'swap_usage' => swap_usage_summary(),
+            'disk_free' => disk_free_information('/'),
+            'last_metric' => $latest['recorded_at'] ?? 'No samples yet',
+        ],
     ];
 }

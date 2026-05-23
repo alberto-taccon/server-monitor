@@ -5,6 +5,10 @@ declare(strict_types=1);
 require_once __DIR__ . '/../app/metrics.php';
 require_once __DIR__ . '/../app/server_info.php';
 
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+header('Expires: 0');
+
 $dashboardMetrics = dashboard_metrics_payload();
 $dbStatus = database_is_available();
 $services = monitored_services();
@@ -15,17 +19,44 @@ $ramData = $dashboardMetrics['charts']['ram'];
 $historyCount = (int) $dashboardMetrics['history_count'];
 $latestRecordedAt = $dashboardMetrics['latest_recorded_at'] ?? null;
 $latestRecordedAtDisplay = $latestRecordedAt ?? 'No samples yet';
+$systemDetails = is_array($dashboardMetrics['system'] ?? null) ? $dashboardMetrics['system'] : [];
+$systemDetails += [
+    'uptime' => uptime_information(),
+    'operating_system' => os_information(),
+    'php_version' => PHP_VERSION,
+    'load_average' => load_average_information(),
+    'swap_usage' => swap_usage_summary(),
+    'disk_free' => disk_free_information('/'),
+    'last_metric' => $latestRecordedAtDisplay,
+];
+$scriptName = str_replace('\\', '/', $_SERVER['SCRIPT_NAME'] ?? '/dashboard.php');
+$publicBasePath = dirname($scriptName);
+if ($publicBasePath === '/' || $publicBasePath === '.') {
+    $publicBasePath = '';
+} else {
+    $publicBasePath = rtrim($publicBasePath, '/');
+}
 $autoRefreshMs = 5000;
 $initialRefreshSeconds = (int) ceil($autoRefreshMs / 1000);
 $cssVersion = (string) filemtime(__DIR__ . '/assets/css/app.css');
 $jsVersion = (string) filemtime(__DIR__ . '/assets/js/dashboard.js');
+
+function service_status_badge_variant(string $status): string
+{
+    return match ($status) {
+        'active', 'running', 'online' => 'success',
+        'offline', 'failed', 'inactive', 'dead', 'stale', 'missing' => 'danger',
+        default => 'secondary',
+    };
+}
+
 ?>
 <!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Dashboard | Server Monitor</title>
+    <title>Overview | Server Monitor</title>
     <script>
         (() => {
             try {
@@ -40,10 +71,10 @@ $jsVersion = (string) filemtime(__DIR__ . '/assets/js/dashboard.js');
         })();
     </script>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="/assets/css/app.css?v=<?= e($cssVersion) ?>" rel="stylesheet">
+    <link href="<?= e($publicBasePath . '/assets/css/app.css?v=' . $cssVersion) ?>" rel="stylesheet">
 </head>
 <body class="dashboard-page">
-    <div class="app-layout" data-dashboard-shell>
+    <div class="app-layout" data-dashboard-shell data-overview-mode="hero">
         <aside class="sidebar">
             <div class="sidebar-tools">
                 <a href="/dashboard.php" class="sidebar-badge" aria-label="Server Monitor dashboard">SM</a>
@@ -69,8 +100,8 @@ $jsVersion = (string) filemtime(__DIR__ . '/assets/js/dashboard.js');
         <main class="main-content">
             <header class="topbar">
                 <div>
-                    <p class="eyebrow">Linux VPS health</p>
-                    <h1>Dashboard</h1>
+                    <p class="eyebrow">Server Monitor</p>
+                    <h1>Overview</h1>
                 </div>
                 <div class="topbar-actions">
                     <div class="refresh-indicator" data-refresh-indicator data-refresh-state="waiting">
@@ -79,14 +110,15 @@ $jsVersion = (string) filemtime(__DIR__ . '/assets/js/dashboard.js');
                 </div>
             </header>
 
-            <section class="row g-3 mb-4" id="overview" data-dashboard-group="overview">
+            <section class="overview-section" id="overview" data-dashboard-group="overview">
+                <div class="overview-grid">
                 <?php foreach ($cards as $metricKey => $card): ?>
-                    <div class="col-12 col-md-6 col-xl-3">
+                    <div class="overview-card-slot">
                         <article class="metric-card" data-metric-card="<?= e($metricKey) ?>">
                             <div class="mb-3">
                                 <div>
                                     <h2><?= e($card['title']) ?></h2>
-                                    <p><?= e($card['subtitle']) ?></p>
+                                    <p data-metric-subtitle><?= e($card['subtitle']) ?></p>
                                 </div>
                             </div>
                             <strong class="<?= e($card['value_class'] ?? '') ?>" data-metric-value><?= e($card['formatted_value']) ?></strong>
@@ -96,62 +128,92 @@ $jsVersion = (string) filemtime(__DIR__ . '/assets/js/dashboard.js');
                         </article>
                     </div>
                 <?php endforeach; ?>
-            </section>
-
-            <section class="row g-3 mb-4" data-dashboard-group="charts">
-                <div class="col-12 col-xl-6" id="cpu-history" data-dashboard-panel="cpu-history">
-                    <article class="panel">
-                        <div class="panel-header">
-                            <h2>CPU History</h2>
-                        </div>
-                        <canvas id="cpuChart" height="115"></canvas>
-                    </article>
-                </div>
-                <div class="col-12 col-xl-6" id="ram-history" data-dashboard-panel="ram-history">
-                    <article class="panel">
-                        <div class="panel-header">
-                            <h2>RAM History</h2>
-                        </div>
-                        <canvas id="ramChart" height="115"></canvas>
-                    </article>
                 </div>
             </section>
 
-            <section class="row g-3" data-dashboard-group="details">
-                <div class="col-12 col-lg-6" id="system-info" data-dashboard-panel="system-info">
-                    <article class="panel">
-                        <div class="panel-header">
-                            <h2>System Information</h2>
-                        </div>
-                        <dl class="system-list">
-                            <div><dt>Server uptime</dt><dd><?= e(uptime_information()) ?></dd></div>
-                            <div><dt>Operating system</dt><dd><?= e(os_information()) ?></dd></div>
-                            <div><dt>PHP version</dt><dd><?= e(PHP_VERSION) ?></dd></div>
-                            <div><dt>Last metric</dt><dd data-last-metric><?= e($latestRecordedAtDisplay) ?></dd></div>
-                        </dl>
-                    </article>
-                </div>
-                <div class="col-12 col-lg-6" id="service-status" data-dashboard-panel="service-status">
-                    <article class="panel">
-                        <div class="panel-header">
-                            <h2>Service Status</h2>
-                        </div>
-                        <div class="status-list">
-                            <div>
-                                <span>Database</span>
-                                <span class="badge text-bg-<?= $dbStatus ? 'success' : 'danger' ?>"><?= $dbStatus ? 'online' : 'offline' ?></span>
-                            </div>
-                            <?php foreach ($services as $service => $status): ?>
-                                <?php $ok = in_array($status, ['active', 'running'], true); ?>
-                                <div>
-                                    <span><?= e($service) ?></span>
-                                    <span class="badge text-bg-<?= $ok ? 'success' : 'secondary' ?>"><?= e($status) ?></span>
+            <div
+                class="overview-reveal"
+                id="overview-reveal"
+                data-overview-reveal
+                data-state="collapsed"
+                aria-hidden="true"
+            >
+                <div class="overview-reveal-inner">
+                    <section class="row g-3 mb-4" data-dashboard-group="charts">
+                        <div class="col-12 col-xl-6" id="cpu-history" data-dashboard-panel="cpu-history">
+                            <article class="panel">
+                                <div class="panel-header">
+                                    <h2>CPU History</h2>
                                 </div>
-                            <?php endforeach; ?>
+                                <canvas id="cpuChart" height="115"></canvas>
+                            </article>
                         </div>
-                    </article>
+                        <div class="col-12 col-xl-6" id="ram-history" data-dashboard-panel="ram-history">
+                            <article class="panel">
+                                <div class="panel-header">
+                                    <h2>RAM History</h2>
+                                </div>
+                                <canvas id="ramChart" height="115"></canvas>
+                            </article>
+                        </div>
+                    </section>
+
+                    <section class="row g-3" data-dashboard-group="details">
+                        <div class="col-12 col-lg-6" id="system-info" data-dashboard-panel="system-info">
+                            <article class="panel">
+                                <div class="panel-header">
+                                    <h2>System Information</h2>
+                                </div>
+                                <dl class="system-list">
+                                    <div><dt>Server uptime</dt><dd data-system-detail="uptime"><?= e((string) $systemDetails['uptime']) ?></dd></div>
+                                    <div><dt>Operating system</dt><dd data-system-detail="operating_system"><?= e((string) $systemDetails['operating_system']) ?></dd></div>
+                                    <div><dt>PHP version</dt><dd data-system-detail="php_version"><?= e((string) $systemDetails['php_version']) ?></dd></div>
+                                    <div><dt>Load average (1 min, 5 min, 15 min)</dt><dd data-system-detail="load_average"><?= e((string) $systemDetails['load_average']) ?></dd></div>
+                                    <div><dt>Swap usage</dt><dd data-system-detail="swap_usage"><?= e((string) $systemDetails['swap_usage']) ?></dd></div>
+                                    <div><dt>Disk free</dt><dd data-system-detail="disk_free"><?= e((string) $systemDetails['disk_free']) ?></dd></div>
+                                    <div><dt>Last metric</dt><dd data-last-metric data-system-detail="last_metric"><?= e((string) $systemDetails['last_metric']) ?></dd></div>
+                                </dl>
+                            </article>
+                        </div>
+                        <div class="col-12 col-lg-6" id="service-status" data-dashboard-panel="service-status">
+                            <article class="panel">
+                                <div class="panel-header">
+                                    <h2>Service Status</h2>
+                                </div>
+                                <div class="status-list">
+                                    <div>
+                                        <span>Database</span>
+                                        <span class="badge text-bg-<?= $dbStatus ? 'success' : 'danger' ?>" data-database-status><?= $dbStatus ? 'online' : 'offline' ?></span>
+                                    </div>
+                                    <?php foreach ($services as $service => $status): ?>
+                                        <div>
+                                            <span><?= e($service) ?></span>
+                                            <span class="badge text-bg-<?= e(service_status_badge_variant((string) $status)) ?>" data-service-status="<?= e($service) ?>"><?= e($status) ?></span>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            </article>
+                        </div>
+                    </section>
                 </div>
-            </section>
+            </div>
+
+            <div class="overview-dock" data-overview-dock>
+                <button
+                    type="button"
+                    class="overview-toggle"
+                    data-overview-toggle
+                    data-state="collapsed"
+                    aria-expanded="false"
+                    aria-controls="overview-reveal"
+                >
+                    <span class="overview-toggle-copy">
+                        <strong data-overview-toggle-label>Show more</strong>
+                        <span data-overview-toggle-meta>Charts, system info</span>
+                    </span>
+                    <span class="overview-toggle-arrow" data-overview-toggle-arrow aria-hidden="true">↓</span>
+                </button>
+            </div>
 
             <footer class="site-footer mt-4">
                 <div class="panel footer-card d-flex justify-content-center align-items-center">
@@ -169,11 +231,11 @@ $jsVersion = (string) filemtime(__DIR__ . '/assets/js/dashboard.js');
             cpu: <?= json_encode($cpuData, JSON_THROW_ON_ERROR) ?>,
             ram: <?= json_encode($ramData, JSON_THROW_ON_ERROR) ?>,
             latestRecordedAt: <?= json_encode($latestRecordedAt, JSON_THROW_ON_ERROR) ?>,
-            metricsEndpoint: '/api/metrics.php',
+            metricsEndpoint: <?= json_encode($publicBasePath . '/api/metrics.php', JSON_THROW_ON_ERROR) ?>,
             autoRefreshMs: <?= e((string) $autoRefreshMs) ?>
         };
     </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-    <script src="/assets/js/dashboard.js?v=<?= e($jsVersion) ?>"></script>
+    <script src="<?= e($publicBasePath . '/assets/js/dashboard.js?v=' . $jsVersion) ?>"></script>
 </body>
 </html>

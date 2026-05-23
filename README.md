@@ -6,7 +6,15 @@ Lightweight PHP 8.3 dashboard for monitoring a Linux VPS without a framework.
 
 ## Preview
 
-![Server Monitor dashboard](docs/screenshots/dashboard.png)
+### Light Theme
+
+![Server Monitor light theme](docs/screenshots/dashboard_w.png)
+![Server Monitor light theme alternate view](docs/screenshots/dashboard_w_2.png)
+
+### Dark Theme
+
+![Server Monitor dark theme](docs/screenshots/dashboard_b.png)
+![Server Monitor dark theme alternate view](docs/screenshots/dashboard_b_2.png)
 
 ## Features
 
@@ -15,7 +23,7 @@ Lightweight PHP 8.3 dashboard for monitoring a Linux VPS without a framework.
 - Live network throughput card (`RX` / `TX` per second)
 - CPU and RAM history charts
 - System information, uptime, and PHP version
-- Database connectivity and service status checks
+- Database connectivity and configurable service status checks
 - Dark mode with saved preference
 - Responsive layout for desktop and mobile
 - JSON metrics endpoint for auto-refresh
@@ -77,6 +85,14 @@ server-monitor/
 
 ## Quick Start
 
+Install the required packages on Ubuntu / Debian:
+
+```bash
+sudo apt update
+sudo apt install -y git nginx mariadb-server php8.3 php8.3-fpm php8.3-mysql cron
+sudo systemctl enable --now nginx mariadb php8.3-fpm cron
+```
+
 Clone the project:
 
 ```bash
@@ -97,7 +113,6 @@ FLUSH PRIVILEGES;
 
 ```bash
 mysql -u server_monitor -p server_monitor < database/schema.sql
-chmod +x scripts/collect_metrics.php
 ```
 
 Copy `.env.example` to `.env` and update the database values:
@@ -112,7 +127,32 @@ DB_PORT=3306
 DB_DATABASE=server_monitor
 DB_USERNAME=server_monitor
 DB_PASSWORD=change_me
+
+SERVICE_WEB=nginx|apache2|httpd
+SERVICE_PHP=php8.3-fpm|php-fpm|php8.2-fpm|php8.1-fpm
+SERVICE_COLLECTOR_ENABLED=true
+SERVICE_COLLECTOR_LABEL=Metrics collector
+SERVICE_COLLECTOR_STALE_AFTER=20
+SERVICE_EXTRA=
 ```
+
+Set recommended permissions:
+
+```bash
+sudo chown -R $USER:www-data /var/www/server-monitor
+sudo find /var/www/server-monitor -type d -exec chmod 755 {} \;
+sudo find /var/www/server-monitor -type f -exec chmod 644 {} \;
+sudo chmod +x /var/www/server-monitor/scripts/collect_metrics.php
+sudo chgrp www-data /var/www/server-monitor/.env
+sudo chmod 640 /var/www/server-monitor/.env
+```
+
+These commands assume:
+
+- the project is installed in `/var/www/server-monitor`
+- your deploy user owns the repository
+- the web server group is `www-data`
+
 Run the dashboard locally:
 
 ```bash
@@ -140,24 +180,75 @@ The database stores:
 - `ram_usage`
 - `disk_usage`
 
-Example cron setup every 5 seconds:
+If `cron` is not installed yet:
+
+```bash
+sudo apt update
+sudo apt install -y cron
+sudo systemctl enable --now cron
+```
+
+Install the collector crontab for the current user:
+
+```bash
+crontab -l 2>/dev/null > /tmp/server-monitor-cron
+cat <<'EOF' >> /tmp/server-monitor-cron
+# BEGIN server-monitor-5s
+* * * * * /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 5 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 10 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 15 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 20 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 25 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 30 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 35 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 40 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 45 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 50 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 55 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+# END server-monitor-5s
+EOF
+crontab /tmp/server-monitor-cron
+rm /tmp/server-monitor-cron
+crontab -l
+```
+
+The installed block will look like this:
 
 ```cron
-* * * * * /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 5 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 10 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 15 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 20 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 25 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 30 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 35 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 40 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 45 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 50 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
-* * * * * sleep 55 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php >> /var/log/server-monitor-metrics.log 2>&1
+* * * * * /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 5 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 10 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 15 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 20 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 25 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 30 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 35 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 40 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 45 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 50 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
+* * * * * sleep 55 && /usr/bin/php /var/www/server-monitor/scripts/collect_metrics.php
 ```
 
 The dashboard UI currently refreshes every `5s` through `$autoRefreshMs` in `public/dashboard.php`. If the collector runs less often, the page still refreshes, but the stored CPU/RAM/Disk values will update only when a new sample is written.
+
+## Service Status Configuration
+
+The `Service Status` panel is configurable through `.env`.
+
+- `SERVICE_WEB` accepts one or more fallback service names separated by `|`
+- `SERVICE_PHP` accepts one or more PHP-FPM service names separated by `|`
+- `SERVICE_COLLECTOR_ENABLED` toggles the `Metrics collector` row
+- `SERVICE_COLLECTOR_STALE_AFTER` marks the collector as stale if the latest database sample is older than the configured number of seconds
+- `SERVICE_EXTRA` accepts comma-separated `Label=service1|service2` pairs
+
+Example:
+
+```env
+SERVICE_WEB=apache2|httpd
+SERVICE_PHP=php8.2-fpm|php-fpm
+SERVICE_EXTRA=Database engine=mariadb|mysql,Redis=redis-server
+```
 
 ## Deployment Example
 

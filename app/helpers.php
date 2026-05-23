@@ -31,13 +31,13 @@ function clamp_percentage(float $value): float
     return min(100.0, max(0.0, $value));
 }
 
-function format_percentage(?float $value): string
+function format_percentage(?float $value, int $decimals = 1): string
 {
     if ($value === null) {
         return 'N/A';
     }
 
-    return number_format($value, 1) . '%';
+    return number_format($value, max(0, $decimals)) . '%';
 }
 
 function format_bytes_value(int|float|null $bytes): string

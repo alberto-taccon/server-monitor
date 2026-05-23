@@ -1,7 +1,1 @@
 .env
-vendor/
-node_modules/
-.DS_Store
-*.log
-public/assets/vendor/
-tmp/
